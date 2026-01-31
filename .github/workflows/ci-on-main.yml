@@ -132,3 +132,61 @@ jobs:
             --create-namespace \
             --set image.repository=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY} \
             --set image.tag=${{ needs.prepare.outputs.image_tag }}
+
+
+  generate-report:          
+    name: 📝 Generate CI Report
+    runs-on: ubuntu-latest
+    if: always()
+    needs:
+      - prepare
+      - security-scan-fs
+      - build-and-push
+      - scan-image
+      - deploy-dev
+
+    steps:
+      - name: Create report
+        run: |
+          mkdir -p reports
+          cat <<EOF > reports/ci-run-${{ github.run_id }}.md
+          # CI Run Report
+
+          **Repository:** ${{ github.repository }}
+          **Branch:** ${{ github.ref_name }}
+          **Commit:** ${{ github.sha }}
+          **Run ID:** ${{ github.run_id }}
+          **Status:** ${{ job.status }}
+
+          ## Job Summary
+          - Prepare: ${{ needs.prepare.result }}
+          - FS Scan: ${{ needs.security-scan-fs.result }}
+          - Build & Push: ${{ needs.build-and-push.result }}
+          - Image Scan: ${{ needs.scan-image.result }}
+          - Deploy Dev: ${{ needs.deploy-dev.result }}
+          EOF
+
+      - name: Upload report artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-report
+          path: reports/
+
+  create-issue-on-failure:
+    name: 🐞 Create Issue on Failure
+    runs-on: ubuntu-latest
+    if: failure()
+    needs: generate-report
+
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: "CI failed on main – Run ${{ github.run_id }}",
+              body: "CI run **${{ github.run_id }}** failed.📄 Report artifact: ci-report  🔗 Workflow: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"})
+
+
+
