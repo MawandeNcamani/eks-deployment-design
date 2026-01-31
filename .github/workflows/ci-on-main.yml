@@ -1,141 +1,134 @@
-name: CI on Main - Deploy to Dev
+name: CI on Main
 
 on:
   push:
     branches:
       - main
+  pull_request:
+    branches:
+      - main
 
-concurrency:
-  group: deploy-dev-${{ github.ref }}
-  cancel-in-progress: false
+permissions:
+  id-token: write
+  contents: read
 
 env:
-  AWS_REGION: us-east-1
-  CLUSTER_NAME: platform-eks-cluster
-  NAMESPACE: dev
-  HELM_TIMEOUT: 10m
+  AWS_REGION: eu-west-1
+  EKS_CLUSTER_NAME: my-eks-cluster
+  ECR_REPOSITORY: my-app
+  IMAGE_NAME: my-app
+  K8S_NAMESPACE: dev
 
 jobs:
-  # ------------------------------------------------------------
-  # 1. Checkout + Tag
-  # ------------------------------------------------------------
   prepare:
     name: 🏷️ Prepare Build Metadata
     runs-on: ubuntu-latest
     outputs:
-      image_tag: ${{ steps.tag.outputs.tag }}
+      image_tag: ${{ steps.tag.outputs.image_tag }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout source
+        uses: actions/checkout@v4
 
-      - name: Generate Image Tag
+      - name: Generate image tag
         id: tag
         run: |
-          echo "tag=dev-${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+          IMAGE_TAG=dev-${GITHUB_SHA::7}
+          echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
 
-  # ------------------------------------------------------------
-  # 2. Security Scan (Repo / Dockerfiles)
-  # ------------------------------------------------------------
   security-scan-fs:
-    name: 🔐 Security Scan (Filesystem)
+    name: 🔐 Security Scan (Source Filesystem)
     runs-on: ubuntu-latest
     needs: prepare
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Trivy FS Scan
-        uses: aquasecurity/trivy-action@0.24.0
+      - name: Trivy filesystem scan
+        uses: aquasecurity/trivy-action@master
         with:
           scan-type: fs
-          severity: HIGH,CRITICAL
-          ignore-unfixed: true
+          severity: CRITICAL,HIGH
           exit-code: 1
 
-  # ------------------------------------------------------------
-  # 3. Build Images
-  # ------------------------------------------------------------
-  build-images:
-    name: 🏗️ Build Docker Images
+  build-and-push:
+    name: 🏗️ Build & Push Docker Image
     runs-on: ubuntu-latest
-    needs: security-scan-fs
+    needs:
+      - prepare
+      - security-scan-fs
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build Main App Image
-        run: |
-          docker build \
-            -t main:${{ needs.prepare.outputs.image_tag }} \
-            ./main
-
-      - name: Build Microservice Image
-        run: |
-          docker build \
-            -t micro:${{ needs.prepare.outputs.image_tag }} \
-            ./microservice
-
-  # ------------------------------------------------------------
-  # 4. Image Security Scan
-  # ------------------------------------------------------------
-  security-scan-images:
-    name: 🔐 Security Scan (Images)
-    runs-on: ubuntu-latest
-    needs: build-images
-
-    steps:
-      - name: Scan Main App Image
-        uses: aquasecurity/trivy-action@0.24.0
-        with:
-          image-ref: main:${{ needs.prepare.outputs.image_tag }}
-          severity: HIGH,CRITICAL
-          ignore-unfixed: true
-          exit-code: 1
-
-      - name: Scan Microservice Image
-        uses: aquasecurity/trivy-action@0.24.0
-        with:
-          image-ref: micro:${{ needs.prepare.outputs.image_tag }}
-          severity: HIGH,CRITICAL
-          ignore-unfixed: true
-          exit-code: 1
-
-  # ------------------------------------------------------------
-  # 5. Deploy to EKS (REAL)
-  # ------------------------------------------------------------
-  deploy-dev:
-    name: 🚀 Deploy to Dev
-    runs-on: ubuntu-latest
-    needs: security-scan-images
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Configure AWS Credentials (OIDC)
+      - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::<ACCOUNT_ID>:role/github-actions-eks-deployer
-          aws-region: $AWS_REGION
+          role-to-assume: arn:aws:iam::123456789012:role/github-actions-ecr
+          aws-region: ${{ env.AWS_REGION }}
 
-      - name: Configure kubeconfig
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build Docker image
+        run: |
+          docker build \
+            -t $IMAGE_NAME:${{ needs.prepare.outputs.image_tag }} \
+            .
+
+      - name: Tag image for ECR
+        run: |
+          docker tag \
+            $IMAGE_NAME:${{ needs.prepare.outputs.image_tag }} \
+            ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}:${{ needs.prepare.outputs.image_tag }}
+
+      - name: Push image to ECR
+        run: |
+          docker push \
+            ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}:${{ needs.prepare.outputs.image_tag }}
+
+  scan-image:
+    name: 🛡️ Security Scan (Container Image)
+    runs-on: ubuntu-latest
+    needs:
+      - prepare
+      - build-and-push
+
+    steps:
+      - name: Trivy image scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: |
+            ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:${{ needs.prepare.outputs.image_tag }}
+          severity: CRITICAL,HIGH
+          exit-code: 1
+
+  deploy-dev:
+    name: 🚀 Deploy to EKS (Dev)
+    runs-on: ubuntu-latest
+    needs:
+      - prepare
+      - scan-image
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::123456789012:role/github-actions-eks
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Update kubeconfig
         run: |
           aws eks update-kubeconfig \
-            --name $CLUSTER_NAME \
-            --region $AWS_REGION
+            --region $AWS_REGION \
+            --name $EKS_CLUSTER_NAME
 
-      - name: Deploy Main App
+      - name: Deploy via Helm
         run: |
-          helm upgrade --install main-app ./helm/main-app \
-            --namespace $NAMESPACE \
+          helm upgrade --install my-app ./helm/my-app \
+            --namespace $K8S_NAMESPACE \
             --create-namespace \
-            --set image.tag=${{ needs.prepare.outputs.image_tag }} \
-            --wait \
-            --timeout $HELM_TIMEOUT
-
-      - name: Deploy Microservice
-        run: |
-          helm upgrade --install microservice ./helm/microservice \
-            --namespace $NAMESPACE \
-            --set image.tag=${{ needs.prepare.outputs.image_tag }} \
-            --wait \
-            --timeout $HELM_TIMEOUT
+            --set image.repository=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY} \
+            --set image.tag=${{ needs.prepare.outputs.image_tag }}
