@@ -134,8 +134,7 @@ jobs:
             --set image.repository=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY} \
             --set image.tag=${{ needs.prepare.outputs.image_tag }}
 
-
-  generate-report:          
+  generate-report:
     name: 📝 Generate CI Report
     runs-on: ubuntu-latest
     if: always()
@@ -147,17 +146,31 @@ jobs:
       - deploy-dev
 
     steps:
-      - name: Create report
+      - uses: actions/checkout@v4
+
+      - name: Generate report
         run: |
-          mkdir -p reports
-          cat <<EOF > reports/ci-run-${{ github.run_id }}.md
+          mkdir -p ci-reports
+
+          OVERALL_STATUS="success"
+          FAILURE_REASON=""
+
+          if [[ "${{ needs.build-and-push.result }}" == "failure" ]]; then
+            OVERALL_STATUS="failure"
+            FAILURE_REASON="Docker build or push failed. Possible causes: missing Dockerfile, invalid image tag, or registry authentication failure."
+          elif [[ "${{ needs.security-scan-fs.result }}" == "failure" ]]; then
+            OVERALL_STATUS="failure"
+            FAILURE_REASON="Filesystem security scan failed due to high or critical vulnerabilities."
+          fi
+
+          cat <<EOF > ci-reports/ci-run-${{ github.run_id }}.md
           # CI Run Report
 
           **Repository:** ${{ github.repository }}
           **Branch:** ${{ github.ref_name }}
           **Commit:** ${{ github.sha }}
           **Run ID:** ${{ github.run_id }}
-          **Status:** ${{ job.status }}
+          **Overall Status:** ${OVERALL_STATUS}
 
           ## Job Summary
           - Prepare: ${{ needs.prepare.result }}
@@ -165,13 +178,25 @@ jobs:
           - Build & Push: ${{ needs.build-and-push.result }}
           - Image Scan: ${{ needs.scan-image.result }}
           - Deploy Dev: ${{ needs.deploy-dev.result }}
+
+          ## Failure Analysis
+          ${FAILURE_REASON:-"No failures detected."}
           EOF
+
+      - name: Commit report to repo
+        if: always()
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add ci-reports/
+          git commit -m "ci: add report for run ${{ github.run_id }}" || echo "Nothing to commit"
+          git push
 
       - name: Upload report artifact
         uses: actions/upload-artifact@v4
         with:
           name: ci-report
-          path: reports/
+          path: ci-reports/
 
   create-issue-on-failure:
     name: 🐞 Create Issue on Failure
@@ -187,7 +212,5 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               title: "CI failed on main – Run ${{ github.run_id }}",
-              body: "CI run **${{ github.run_id }}** failed.📄 Report artifact: ci-report  🔗 Workflow: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"})
-
-
-
+              body: "CI run **${{ github.run_id }}** failed.\n\n📄 Report artifact: ci-report\n🔗 Workflow: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            })
