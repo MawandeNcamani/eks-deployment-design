@@ -1,0 +1,12 @@
+image:
+  repository: example/main-app
+  tag: latest
+
+replicaCount: 2
+
+service:
+  port: 3000
+
+ingress:
+  enabled: true
+  host: api.example.com

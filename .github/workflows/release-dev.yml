@@ -1,0 +1,62 @@
+name: Create Dev Release
+
+on:
+  workflow_run:
+    workflows: ["CI on Main - Deploy to Dev"]
+    types:
+      - completed
+
+jobs:
+  release:
+    if: >
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      
+      - name: Create Dev Release
+        uses: google-github-actions/release-please-action@v4
+        id: release
+        with:
+          release-type: node
+          prerelease: true
+          default-branch: main
+          package-name: "app"
+          version-file: "VERSION"
+          prerelease-type: "dev"
+          bump-minor-pre-major: true
+      
+      - name: Update Build Results with Release Info
+        if: ${{ steps.release.outputs.release_created }}
+        run: |
+          RELEASE_TAG="${{ steps.release.outputs.tag_name }}"
+          RELEASE_URL="${{ steps.release.outputs.release_url }}"
+          
+          # Append release info to the build summary
+          cat <<EOF >> build-results/last-dev-build.md
+          
+          ## Release Information
+          
+          **Release Tag**: ${RELEASE_TAG}  
+          **Release URL**: ${RELEASE_URL}  
+          **Changelog**: [View Full Changelog](./CHANGELOG.md)
+          
+          ### Promotion Instructions:
+          1. Review the changes in ${RELEASE_TAG}
+          2. Check build-results/last-dev-build.md for test results
+          3. If approved, run the "Promote to Staging" workflow
+          EOF
+          
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add build-results/last-dev-build.md
+          git commit -m "docs: Add release info ${RELEASE_TAG} to build summary"
+          git push

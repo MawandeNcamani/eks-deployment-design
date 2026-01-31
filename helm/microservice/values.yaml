@@ -1,0 +1,8 @@
+image:
+  repository: example/microservice
+  tag: latest
+
+replicaCount: 1
+
+service:
+  port: 3000

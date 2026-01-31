@@ -1,0 +1,80 @@
+name: Promote Dev Release to Staging
+
+on:
+  workflow_dispatch:
+    inputs:
+      devReleaseTag:
+        description: 'Which dev release to promote? (Check CHANGELOG.md and build-results/last-dev-build.md)'
+        required: true
+        default: 'dev-v1.2.3'
+        type: string
+
+jobs:
+  validate-and-promote:
+    runs-on: ubuntu-latest
+    environment: staging  # Requires manual approval in GitHub Environments
+    
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      
+      - name: Validate Release Tag
+        id: validate
+        run: |
+          TAG="${{ github.event.inputs.devReleaseTag }}"
+          
+          # Check if tag exists
+          if ! git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "❌ Error: Tag '$TAG' does not exist"
+            echo "Available dev releases:"
+            git tag -l 'dev-*' | tail -5
+            exit 1
+          fi
+          
+          # Ensure it's a dev release
+          if [[ ! "$TAG" =~ ^dev- ]]; then
+            echo "❌ Error: Only dev releases (starting with 'dev-') can be promoted"
+            exit 1
+          fi
+          
+          # Extract version for staging (remove 'dev-' prefix)
+          STABLE_VERSION="${TAG#dev-}"
+          echo "stable_version=${STABLE_VERSION}" >> $GITHUB_OUTPUT
+          echo "release_tag=${TAG}" >> $GITHUB_OUTPUT
+          echo "✅ Validated release tag: ${TAG}"
+      
+      - name: Display Promotion Context
+        run: |
+          echo "========================================"
+          echo "PROMOTION TO STAGING"
+          echo "========================================"
+          echo ""
+          echo "Promoting: ${{ steps.validate.outputs.release_tag }}"
+          echo "As version: ${{ steps.validate.outputs.stable_version }}"
+          echo ""
+          echo "📋 Review before proceeding:"
+          echo "1. CHANGELOG.md - See what changed"
+          echo "2. build-results/last-dev-build.md - See test results"
+          echo "3. Verify the release exists in container registry"
+          echo ""
+          echo "📦 This workflow will:"
+          echo "   - Tag the release as ${{ steps.validate.outputs.stable_version }}"
+          echo "   - Deploy to staging namespace"
+          echo "   - Run smoke tests"
+          echo "   - Create a stable release candidate if successful"
+          echo "========================================"
+      
+      - name: Simulate Staging Deployment
+        run: |
+          echo "🚀 DEPLOYING TO STAGING"
+          echo "Release: ${{ steps.validate.outputs.release_tag }}"
+          echo "Version: ${{ steps.validate.outputs.stable_version }}"
+          echo ""
+          echo "In production, this would:"
+          echo "1. Pull image for tag: ${{ steps.validate.outputs.release_tag }}"
+          echo "2. Re-tag as: ${{ steps.validate.outputs.stable_version }}"
+          echo "3. Deploy to staging namespace with Helm"
+          echo "4. Run integration/smoke tests"
+          echo ""
+          echo "✅ Staging deployment simulation complete"
