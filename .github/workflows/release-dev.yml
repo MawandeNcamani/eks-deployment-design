@@ -2,9 +2,9 @@ name: Create Dev Release
 
 on:
   workflow_run:
-    workflows: ["CI on Main - Deploy to Dev"]
-    types:
-      - completed
+    workflows: ["CI on Main - Build & Verify"]
+    types: [ completed ]
+    
 
 jobs:
   release:
