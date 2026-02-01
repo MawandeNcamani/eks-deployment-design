@@ -1,0 +1,5 @@
+build-results/
+ci-reports/
+*.tfstate
+*.tfstate.*
+.terraform/

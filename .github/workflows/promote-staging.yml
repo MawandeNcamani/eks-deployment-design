@@ -4,10 +4,14 @@ on:
   workflow_dispatch:
     inputs:
       devReleaseTag:
-        description: 'Which dev release to promote? (Check CHANGELOG.md and build-results/last-dev-build.md)'
+        description: 'Which dev release to promote? (Example: dev-123)'
         required: true
-        default: 'dev-v1.2.3'
+        default: 'dev-1'
         type: string
+
+permissions:
+  contents: read
+  id-token: write
 
 jobs:
   validate-and-promote:
@@ -18,6 +22,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: main
+          fetch-depth: 0
       
       - name: Validate Release Tag
         id: validate
@@ -37,13 +42,31 @@ jobs:
             echo "❌ Error: Only dev releases (starting with 'dev-') can be promoted"
             exit 1
           fi
-          
+
           # Extract version for staging (remove 'dev-' prefix)
           STABLE_VERSION="${TAG#dev-}"
           echo "stable_version=${STABLE_VERSION}" >> $GITHUB_OUTPUT
           echo "release_tag=${TAG}" >> $GITHUB_OUTPUT
           echo "✅ Validated release tag: ${TAG}"
-      
+
+      - name: Download deploy metadata from dev release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p build-results
+          gh release download "${{ steps.validate.outputs.release_tag }}" \
+            --repo "${{ github.repository }}" \
+            --pattern "deploy-metadata.json" \
+            --dir build-results
+
+      - name: Read image ref
+        id: meta
+        shell: bash
+        run: |
+          IMAGE_REF=$(python -c "import json; print(json.load(open('build-results/deploy-metadata.json'))['imageRef'])")
+          echo "image_ref=$IMAGE_REF" >> $GITHUB_OUTPUT
+
       - name: Display Promotion Context
         run: |
           echo "========================================"
@@ -64,17 +87,44 @@ jobs:
           echo "   - Run smoke tests"
           echo "   - Create a stable release candidate if successful"
           echo "========================================"
-      
-      - name: Simulate Staging Deployment
+
+      - name: Trivy Image Scan
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          image-ref: ${{ steps.meta.outputs.image_ref }}
+          severity: CRITICAL,HIGH
+          exit-code: 1
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Update kubeconfig
+        shell: bash
         run: |
-          echo "🚀 DEPLOYING TO STAGING"
-          echo "Release: ${{ steps.validate.outputs.release_tag }}"
-          echo "Version: ${{ steps.validate.outputs.stable_version }}"
-          echo ""
-          echo "In production, this would:"
-          echo "1. Pull image for tag: ${{ steps.validate.outputs.release_tag }}"
-          echo "2. Re-tag as: ${{ steps.validate.outputs.stable_version }}"
-          echo "3. Deploy to staging namespace with Helm"
-          echo "4. Run integration/smoke tests"
-          echo ""
-          echo "✅ Staging deployment simulation complete"
+          aws eks update-kubeconfig --name "${{ secrets.EKS_CLUSTER_NAME }}" --region "${{ secrets.AWS_REGION }}"
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+
+      - name: Deploy to staging with Helm
+        shell: bash
+        run: |
+          helm upgrade --install main-app ./helm/main-app \
+            --namespace staging \
+            --create-namespace \
+            --set image.ref='${{ steps.meta.outputs.image_ref }}'
+
+      - name: Publish promotion summary
+        shell: bash
+        run: |
+          cat <<EOF >> $GITHUB_STEP_SUMMARY
+          # Staging Promotion
+
+          **Dev Release:** ${{ steps.validate.outputs.release_tag }}
+          **Staging Version:** ${{ steps.validate.outputs.stable_version }}
+          **Image:** ${{ steps.meta.outputs.image_ref }}
+          **Namespace:** staging
+          EOF

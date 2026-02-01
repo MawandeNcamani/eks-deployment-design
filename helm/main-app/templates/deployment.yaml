@@ -14,7 +14,7 @@ spec:
     spec:
       containers:
         - name: main-app
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: "{{ if .Values.image.ref }}{{ .Values.image.ref }}{{ else }}{{ .Values.image.repository }}:{{ .Values.image.tag }}{{ end }}"
           ports:
             - containerPort: 3000
           envFrom:

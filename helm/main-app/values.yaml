@@ -1,4 +1,5 @@
 image:
+  ref: ""
   repository: example/main-app
   tag: latest
 

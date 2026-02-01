@@ -1,0 +1,104 @@
+name: Deploy to Dev
+
+on:
+  workflow_dispatch:
+    inputs:
+      imageRef:
+        description: Full image reference to deploy (e.g. ghcr.io/org/app:sha or repo/app@sha256:...)
+        required: true
+        type: string
+  repository_dispatch:
+    types: [deploy-dev]
+  workflow_call:
+    inputs:
+      imageRef:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  scan-and-deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: dev
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve image ref
+        id: image
+        shell: bash
+        run: |
+          if [[ -n "${{ inputs.imageRef }}" ]]; then
+            IMAGE_REF="${{ inputs.imageRef }}"
+          else
+            IMAGE_REF="${{ github.event.client_payload.imageRef }}"
+          fi
+
+          if [[ -z "$IMAGE_REF" ]]; then
+            echo "imageRef is required"
+            exit 1
+          fi
+
+          echo "image_ref=$IMAGE_REF" >> $GITHUB_OUTPUT
+
+      - name: Trivy Image Scan
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          image-ref: ${{ steps.image.outputs.image_ref }}
+          severity: CRITICAL,HIGH
+          exit-code: 1
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Update kubeconfig
+        shell: bash
+        run: |
+          aws eks update-kubeconfig --name "${{ secrets.EKS_CLUSTER_NAME }}" --region "${{ secrets.AWS_REGION }}"
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+
+      - name: Deploy to dev with Helm
+        shell: bash
+        run: |
+          helm upgrade --install main-app ./helm/main-app \
+            --namespace dev \
+            --create-namespace \
+            --set image.ref='${{ steps.image.outputs.image_ref }}'
+
+      - name: Write deploy metadata
+        shell: bash
+        run: |
+          mkdir -p build-results
+          cat <<EOF > build-results/deploy-metadata.json
+          {
+            "environment": "dev",
+            "imageRef": "${{ steps.image.outputs.image_ref }}",
+            "repo": "${{ github.repository }}",
+            "runId": "${{ github.run_id }}"
+          }
+          EOF
+
+      - name: Upload deploy metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: deploy-metadata
+          path: build-results/deploy-metadata.json
+
+      - name: Publish deploy summary
+        shell: bash
+        run: |
+          cat <<EOF >> $GITHUB_STEP_SUMMARY
+          # Dev Deployment
+
+          **Image:** ${{ steps.image.outputs.image_ref }}
+          **Namespace:** dev
+          EOF
